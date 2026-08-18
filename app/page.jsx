@@ -4,7 +4,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { 
   Camera, Plus, Calendar, Image as ImageIcon, Loader2, 
-  Sparkles, Sprout, Download, Upload, Settings, X, CheckCircle 
+  Sparkles, Sprout, Download, Upload, Settings, X, CheckCircle,
+  Edit2, Trash2, ChevronLeft, ChevronRight, Maximize2
 } from 'lucide-react';
 
 export default function Home() {
@@ -14,20 +15,30 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
 
-  // バックアップ／設定モーダル
+  // 設定・バックアップ
   const [showSettings, setShowSettings] = useState(false);
   const [backupStatus, setBackupStatus] = useState('');
   const fileInputRef = useRef(null);
 
-  // 新規植物登録用フォーム
+  // 新規植物登録
   const [showAddPlant, setShowAddPlant] = useState(false);
   const [newPlantName, setNewPlantName] = useState('');
   const [newPlantSpecies, setNewPlantSpecies] = useState('');
 
-  // ログ投稿用フォーム
+  // ログ投稿
   const [showAddLog, setShowAddLog] = useState(false);
   const [logNote, setLogNote] = useState('');
+  const [logTakenAt, setLogTakenAt] = useState(new Date().toISOString().slice(0, 10));
   const [selectedFile, setSelectedFile] = useState(null);
+
+  // ログ編集
+  const [editingLog, setEditingLog] = useState(null);
+  const [editNote, setEditNote] = useState('');
+  const [editTakenAt, setEditTakenAt] = useState('');
+  const [updatingLog, setUpdatingLog] = useState(false);
+
+  // 写真拡大ビューア（ライトボックス）
+  const [viewerIndex, setViewerIndex] = useState(null);
 
   // Before/After スライダー位置（%）
   const [sliderPos, setSliderPos] = useState(50);
@@ -35,6 +46,18 @@ export default function Home() {
   useEffect(() => {
     fetchPlants();
   }, []);
+
+  // キーボードの左右キーで拡大ビューアの前後送り・Escで閉じる
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (viewerIndex === null) return;
+      if (e.key === 'ArrowLeft') showPrevPhoto();
+      if (e.key === 'ArrowRight') showNextPhoto();
+      if (e.key === 'Escape') setViewerIndex(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [viewerIndex, logs]);
 
   const fetchPlants = async () => {
     setLoading(true);
@@ -110,6 +133,7 @@ export default function Home() {
           {
             plant_id: selectedPlant.id,
             photo_url: urlData.publicUrl,
+            taken_at: logTakenAt || new Date().toISOString().slice(0, 10),
             note: logNote,
           },
         ])
@@ -117,9 +141,12 @@ export default function Home() {
 
       if (dbError) throw dbError;
 
-      setLogs([...logs, logData[0]]);
+      // 日付順に再ソートして反映
+      const updated = [...logs, logData[0]].sort((a, b) => new Date(a.taken_at) - new Date(b.taken_at));
+      setLogs(updated);
       setSelectedFile(null);
       setLogNote('');
+      setLogTakenAt(new Date().toISOString().slice(0, 10));
       setShowAddLog(false);
     } catch (err) {
       alert('写真の保存に失敗しました: ' + err.message);
@@ -128,7 +155,63 @@ export default function Home() {
     }
   };
 
-  // 1. データエクスポート（バックアップダウンロード）
+  // ログ編集の保存
+  const handleUpdateLog = async (e) => {
+    e.preventDefault();
+    if (!editingLog) return;
+
+    setUpdatingLog(true);
+    try {
+      const { data, error } = await supabase
+        .from('growth_logs')
+        .update({
+          note: editNote,
+          taken_at: editTakenAt,
+        })
+        .eq('id', editingLog.id)
+        .select();
+
+      if (error) throw error;
+
+      const updated = logs.map((l) => (l.id === editingLog.id ? data[0] : l))
+        .sort((a, b) => new Date(a.taken_at) - new Date(b.taken_at));
+      
+      setLogs(updated);
+      setEditingLog(null);
+    } catch (err) {
+      alert('ログの更新に失敗しました: ' + err.message);
+    } finally {
+      setUpdatingLog(false);
+    }
+  };
+
+  // ログ削除
+  const handleDeleteLog = async (logId) => {
+    if (!confirm('この記録を削除してもよろしいですか？')) return;
+
+    const { error } = await supabase.from('growth_logs').delete().eq('id', logId);
+    if (!error) {
+      setLogs(logs.filter((l) => l.id !== logId));
+      if (viewerIndex !== null) setViewerIndex(null);
+    } else {
+      alert('削除に失敗しました: ' + error.message);
+    }
+  };
+
+  // ビューア操作（前へ・次へ）
+  const showPrevPhoto = () => {
+    if (viewerIndex > 0) {
+      setViewerIndex(viewerIndex - 1);
+    }
+  };
+
+  const showNextPhoto = () => {
+    if (viewerIndex < logs.length - 1) {
+      setViewerIndex(viewerIndex + 1);
+    }
+  };
+
+  // バックアップ・エクスポート
   const handleExportData = async () => {
     try {
       setBackupStatus('データを取得中...');
@@ -162,7 +245,7 @@ export default function Home() {
     }
   };
 
-  // 2. データインポート（JSONファイルから復元）
+  // インポート復元
   const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -177,13 +260,11 @@ export default function Home() {
           throw new Error('バックアップファイルの形式が正しくありません');
         }
 
-        // 植物データのUpsert（上書きまたは挿入）
         if (json.plants.length > 0) {
           const { error: pErr } = await supabase.from('plants').upsert(json.plants);
           if (pErr) throw pErr;
         }
 
-        // ログデータのUpsert
         if (json.growth_logs.length > 0) {
           const { error: lErr } = await supabase.from('growth_logs').upsert(json.growth_logs);
           if (lErr) throw lErr;
@@ -212,6 +293,7 @@ export default function Home() {
 
   const firstLog = logs[0];
   const latestLog = logs.length > 1 ? logs[logs.length - 1] : null;
+  const currentViewerLog = viewerIndex !== null ? logs[viewerIndex] : null;
 
   return (
     <main className="min-h-screen bg-slate-50 p-4 md:p-6 max-w-lg mx-auto pb-24">
@@ -240,6 +322,132 @@ export default function Home() {
         </div>
       </header>
 
+      {/* 写真拡大ビューア（ライトボックスモーダル） */}
+      {currentViewerLog && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex flex-col justify-between p-4 select-none">
+          {/* 上部バー */}
+          <div className="flex justify-between items-center text-white/80 pt-2 px-2">
+            <span className="text-xs font-medium bg-white/10 px-3 py-1 rounded-full">
+              {viewerIndex + 1} / {logs.length} 枚目
+            </span>
+            <button
+              onClick={() => setViewerIndex(null)}
+              className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          {/* 中央写真＆送りボタン */}
+          <div className="relative flex-1 flex items-center justify-center my-4 overflow-hidden">
+            <img
+              src={currentViewerLog.photo_url}
+              alt="拡大写真"
+              className="max-h-full max-w-full object-contain rounded-xl shadow-2xl transition-all duration-200"
+            />
+
+            {/* 前へボタン */}
+            {viewerIndex > 0 && (
+              <button
+                onClick={showPrevPhoto}
+                className="absolute left-2 top-1/2 -translate-y-1/2 p-3 bg-black/50 hover:bg-black/80 text-white rounded-full transition backdrop-blur-sm"
+                title="前の写真"
+              >
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+            )}
+
+            {/* 次へボタン */}
+            {viewerIndex < logs.length - 1 && (
+              <button
+                onClick={showNextPhoto}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-black/50 hover:bg-black/80 text-white rounded-full transition backdrop-blur-sm"
+                title="次の写真"
+              >
+                <ChevronRight className="w-6 h-6" />
+              </button>
+            )}
+          </div>
+
+          {/* 下部情報バー */}
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl p-4 text-white max-w-md mx-auto w-full">
+            <div className="flex justify-between items-center mb-1">
+              <span className="text-xs text-emerald-300 font-semibold flex items-center gap-1">
+                <Calendar className="w-3.5 h-3.5" /> {currentViewerLog.taken_at}
+              </span>
+              <button
+                onClick={() => {
+                  setEditingLog(currentViewerLog);
+                  setEditNote(currentViewerLog.note || '');
+                  setEditTakenAt(currentViewerLog.taken_at);
+                  setViewerIndex(null);
+                }}
+                className="text-xs bg-white/20 hover:bg-white/30 text-white px-2.5 py-1 rounded-lg flex items-center gap-1 transition"
+              >
+                <Edit2 className="w-3 h-3" /> このログを編集
+              </button>
+            </div>
+            <p className="text-xs text-white/90 whitespace-pre-wrap">
+              {currentViewerLog.note || 'メモはありません'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ログ再編集モーダル */}
+      {editingLog && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Edit2 className="w-5 h-5 text-emerald-600" /> 記録を編集
+              </h2>
+              <button onClick={() => setEditingLog(null)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateLog} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">撮影日</label>
+                <input
+                  type="date"
+                  value={editTakenAt}
+                  onChange={(e) => setEditTakenAt(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-emerald-600"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">メモ・変化</label>
+                <textarea
+                  value={editNote}
+                  onChange={(e) => setEditNote(e.target.value)}
+                  rows="3"
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-emerald-600"
+                  placeholder="メモを入力..."
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingLog(null)}
+                  className="w-1/2 py-2 text-xs border rounded-lg hover:bg-slate-50 font-medium"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingLog}
+                  className="w-1/2 py-2 text-xs bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 flex items-center justify-center gap-1"
+                >
+                  {updatingLog ? <Loader2 className="w-4 h-4 animate-spin" /> : '更新する'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* 設定・バックアップモーダル */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -256,10 +464,9 @@ export default function Home() {
             <p className="text-xs text-slate-400 mb-4">全植物の記録と写真リンクをバックアップ／復元できます。</p>
 
             <div className="space-y-3">
-              {/* エクスポート */}
               <div className="p-3 border rounded-xl bg-slate-50">
                 <h3 className="text-xs font-bold text-slate-700 mb-1">データをバックアップ (保存)</h3>
-                <p className="text-[11px] text-slate-500 mb-2">手元の端末にJSON形式でバックアップファイルを保存します。</p>
+                <p className="text-[11px] text-slate-500 mb-2">端末にJSONファイルを保存します。</p>
                 <button
                   onClick={handleExportData}
                   className="w-full py-2 bg-slate-800 text-white rounded-lg text-xs font-semibold hover:bg-slate-900 transition flex items-center justify-center gap-1.5"
@@ -268,10 +475,9 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* インポート */}
               <div className="p-3 border rounded-xl bg-slate-50">
                 <h3 className="text-xs font-bold text-slate-700 mb-1">データを復元 (取り込み)</h3>
-                <p className="text-[11px] text-slate-500 mb-2">保存したJSONファイルを読み込んでデータを復元します。</p>
+                <p className="text-[11px] text-slate-500 mb-2">保存したJSONからデータを復元します。</p>
                 <input
                   type="file"
                   accept=".json"
@@ -350,6 +556,16 @@ export default function Home() {
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl">
             <h2 className="text-lg font-bold mb-4">成長写真を記録</h2>
             <form onSubmit={handleAddLog} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">撮影日</label>
+                <input
+                  type="date"
+                  value={logTakenAt}
+                  onChange={(e) => setLogTakenAt(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-emerald-600"
+                  required
+                />
+              </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1">写真を選択 *</label>
                 <input
@@ -521,35 +737,77 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* 成長タイムライン */}
+              {/* 成長タイムライン（再編集・拡大機能付き） */}
               <div>
-                <h3 className="font-bold text-slate-800 text-sm mb-3 px-1">成長タイムライン</h3>
+                <h3 className="font-bold text-slate-800 text-sm mb-3 px-1 flex items-center justify-between">
+                  <span>成長タイムライン ({logs.length}件)</span>
+                  <span className="text-[11px] text-slate-400 font-normal">写真タップで拡大</span>
+                </h3>
                 <div className="space-y-3">
-                  {logs.slice().reverse().map((log, index) => (
-                    <div
-                      key={log.id}
-                      className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 flex gap-3 items-center"
-                    >
-                      <img
-                        src={log.photo_url}
-                        alt="ログ写真"
-                        className="w-16 h-16 rounded-xl object-cover flex-shrink-0"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-xs font-bold text-slate-700">
-                            {logs.length - index === 1 ? '🌱 栽培スタート' : `📸 ログ #${logs.length - index}`}
-                          </span>
-                          <span className="text-[10px] text-slate-400 flex items-center gap-1">
-                            <Calendar className="w-3 h-3" /> {log.taken_at}
-                          </span>
+                  {logs.slice().reverse().map((log, index) => {
+                    const originalIndex = logs.length - 1 - index;
+                    return (
+                      <div
+                        key={log.id}
+                        className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 flex gap-3 items-center group transition hover:border-slate-300"
+                      >
+                        {/* 写真サムネイル（タップで拡大ビューアを開く） */}
+                        <div
+                          onClick={() => setViewerIndex(originalIndex)}
+                          className="relative w-16 h-16 rounded-xl overflow-hidden cursor-pointer flex-shrink-0 group/img bg-slate-100"
+                        >
+                          <img
+                            src={log.photo_url}
+                            alt="ログ写真"
+                            className="w-full h-full object-cover group-hover/img:scale-110 transition duration-200"
+                          />
+                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover/img:opacity-100 transition flex items-center justify-center text-white">
+                            <Maximize2 className="w-4 h-4" />
+                          </div>
                         </div>
-                        <p className="text-xs text-slate-600 truncate">
-                          {log.note || 'メモなし'}
-                        </p>
+
+                        {/* メモと情報 */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-xs font-bold text-slate-700">
+                              {originalIndex === 0 ? '🌱 栽培スタート' : `📸 ログ #${originalIndex + 1}`}
+                            </span>
+                            <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                              <Calendar className="w-3 h-3" /> {log.taken_at}
+                            </span>
+                          </div>
+                          <p 
+                            onClick={() => setViewerIndex(originalIndex)}
+                            className="text-xs text-slate-600 truncate cursor-pointer hover:text-slate-900"
+                          >
+                            {log.note || 'メモなし'}
+                          </p>
+                        </div>
+
+                        {/* 編集・削除アクション */}
+                        <div className="flex items-center gap-1 pl-1 border-l border-slate-100">
+                          <button
+                            onClick={() => {
+                              setEditingLog(log);
+                              setEditNote(log.note || '');
+                              setEditTakenAt(log.taken_at);
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
+                            title="メモ・日付を編集"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteLog(log.id)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                            title="この記録を削除"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
