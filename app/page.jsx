@@ -1,8 +1,11 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
-import { Camera, Plus, Calendar, Image as ImageIcon, Loader2, Sparkles, Sprout } from 'lucide-react';
+import { 
+  Camera, Plus, Calendar, Image as ImageIcon, Loader2, 
+  Sparkles, Sprout, Download, Upload, Settings, X, CheckCircle 
+} from 'lucide-react';
 
 export default function Home() {
   const [plants, setPlants] = useState([]);
@@ -11,12 +14,17 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
 
-  // 新規植物登録用フォーム状態
+  // バックアップ／設定モーダル
+  const [showSettings, setShowSettings] = useState(false);
+  const [backupStatus, setBackupStatus] = useState('');
+  const fileInputRef = useRef(null);
+
+  // 新規植物登録用フォーム
   const [showAddPlant, setShowAddPlant] = useState(false);
   const [newPlantName, setNewPlantName] = useState('');
   const [newPlantSpecies, setNewPlantSpecies] = useState('');
 
-  // ログ投稿用フォーム状態
+  // ログ投稿用フォーム
   const [showAddLog, setShowAddLog] = useState(false);
   const [logNote, setLogNote] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
@@ -24,7 +32,6 @@ export default function Home() {
   // Before/After スライダー位置（%）
   const [sliderPos, setSliderPos] = useState(50);
 
-  // 初期データ取得
   useEffect(() => {
     fetchPlants();
   }, []);
@@ -35,8 +42,11 @@ export default function Home() {
     if (!error && data) {
       setPlants(data);
       if (data.length > 0) {
-        setSelectedPlant(data[0]);
+        setSelectedPlant((prev) => (prev ? data.find((p) => p.id === prev.id) || data[0] : data[0]));
         fetchLogs(data[0].id);
+      } else {
+        setSelectedPlant(null);
+        setLogs([]);
       }
     }
     setLoading(false);
@@ -84,19 +94,16 @@ export default function Home() {
       const fileName = `${selectedPlant.id}-${Date.now()}.${fileExt}`;
       const filePath = `${fileName}`;
 
-      // 1. Supabase Storage に画像をアップロード
       const { error: uploadError } = await supabase.storage
         .from('plant-photos')
         .upload(filePath, selectedFile);
 
       if (uploadError) throw uploadError;
 
-      // 2. 公開URLを取得
       const { data: urlData } = supabase.storage
         .from('plant-photos')
         .getPublicUrl(filePath);
 
-      // 3. データベースにログを保存
       const { data: logData, error: dbError } = await supabase
         .from('growth_logs')
         .insert([
@@ -121,7 +128,81 @@ export default function Home() {
     }
   };
 
-  // 栽培日数の計算
+  // 1. データエクスポート（バックアップダウンロード）
+  const handleExportData = async () => {
+    try {
+      setBackupStatus('データを取得中...');
+      const { data: plantsData, error: pError } = await supabase.from('plants').select('*');
+      const { data: logsData, error: lError } = await supabase.from('growth_logs').select('*');
+
+      if (pError || lError) throw new Error('データ取得に失敗しました');
+
+      const backupData = {
+        version: '1.0',
+        exportedAt: new Date().toISOString(),
+        plants: plantsData || [],
+        growth_logs: logsData || []
+      };
+
+      const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(
+        JSON.stringify(backupData, null, 2)
+      )}`;
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', jsonString);
+      downloadAnchor.setAttribute('download', `plant_growth_backup_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+
+      setBackupStatus('エクスポートが完了しました！');
+      setTimeout(() => setBackupStatus(''), 3000);
+    } catch (err) {
+      alert('エクスポート失敗: ' + err.message);
+      setBackupStatus('');
+    }
+  };
+
+  // 2. データインポート（JSONファイルから復元）
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        setBackupStatus('復元中...');
+        const json = JSON.parse(event.target.result);
+
+        if (!json.plants || !json.growth_logs) {
+          throw new Error('バックアップファイルの形式が正しくありません');
+        }
+
+        // 植物データのUpsert（上書きまたは挿入）
+        if (json.plants.length > 0) {
+          const { error: pErr } = await supabase.from('plants').upsert(json.plants);
+          if (pErr) throw pErr;
+        }
+
+        // ログデータのUpsert
+        if (json.growth_logs.length > 0) {
+          const { error: lErr } = await supabase.from('growth_logs').upsert(json.growth_logs);
+          if (lErr) throw lErr;
+        }
+
+        setBackupStatus('復元が完了しました！');
+        fetchPlants();
+        setTimeout(() => {
+          setBackupStatus('');
+          setShowSettings(false);
+        }, 2000);
+      } catch (err) {
+        alert('インポート失敗: ' + err.message);
+        setBackupStatus('');
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const getDaysPassed = (startDate) => {
     const start = new Date(startDate);
     const now = new Date();
@@ -142,13 +223,79 @@ export default function Home() {
           </h1>
           <p className="text-xs text-slate-500">植物の成長遷移ビューア</p>
         </div>
-        <button
-          onClick={() => setShowAddPlant(true)}
-          className="bg-emerald-600 text-white px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1 shadow hover:bg-emerald-700 transition"
-        >
-          <Plus className="w-4 h-4" /> 植物を追加
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition shadow-sm"
+            title="バックアップと設定"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setShowAddPlant(true)}
+            className="bg-emerald-600 text-white px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1 shadow hover:bg-emerald-700 transition"
+          >
+            <Plus className="w-4 h-4" /> 植物を追加
+          </button>
+        </div>
       </header>
+
+      {/* 設定・バックアップモーダル */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl relative">
+            <button
+              onClick={() => setShowSettings(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h2 className="text-lg font-bold text-slate-800 mb-1 flex items-center gap-2">
+              <Settings className="w-5 h-5 text-emerald-600" /> データ管理・バックアップ
+            </h2>
+            <p className="text-xs text-slate-400 mb-4">全植物の記録と写真リンクをバックアップ／復元できます。</p>
+
+            <div className="space-y-3">
+              {/* エクスポート */}
+              <div className="p-3 border rounded-xl bg-slate-50">
+                <h3 className="text-xs font-bold text-slate-700 mb-1">データをバックアップ (保存)</h3>
+                <p className="text-[11px] text-slate-500 mb-2">手元の端末にJSON形式でバックアップファイルを保存します。</p>
+                <button
+                  onClick={handleExportData}
+                  className="w-full py-2 bg-slate-800 text-white rounded-lg text-xs font-semibold hover:bg-slate-900 transition flex items-center justify-center gap-1.5"
+                >
+                  <Download className="w-4 h-4" /> バックアップをダウンロード
+                </button>
+              </div>
+
+              {/* インポート */}
+              <div className="p-3 border rounded-xl bg-slate-50">
+                <h3 className="text-xs font-bold text-slate-700 mb-1">データを復元 (取り込み)</h3>
+                <p className="text-[11px] text-slate-500 mb-2">保存したJSONファイルを読み込んでデータを復元します。</p>
+                <input
+                  type="file"
+                  accept=".json"
+                  ref={fileInputRef}
+                  onChange={handleImportFile}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full py-2 border border-slate-300 bg-white text-slate-700 rounded-lg text-xs font-semibold hover:bg-slate-100 transition flex items-center justify-center gap-1.5"
+                >
+                  <Upload className="w-4 h-4" /> バックアップファイルを選択
+                </button>
+              </div>
+
+              {backupStatus && (
+                <div className="p-2.5 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-medium flex items-center gap-1.5 justify-center">
+                  <CheckCircle className="w-4 h-4" /> {backupStatus}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 植物追加モーダル */}
       {showAddPlant && (
@@ -312,13 +459,11 @@ export default function Home() {
                     </div>
 
                     <div className="relative h-64 w-full rounded-2xl overflow-hidden shadow-inner bg-slate-900 select-none">
-                      {/* After画像（全面） */}
                       <img
                         src={latestLog.photo_url}
                         alt="最新"
                         className="absolute inset-0 w-full h-full object-cover"
                       />
-                      {/* Before画像（クリップ表示） */}
                       <div
                         className="absolute inset-0 overflow-hidden"
                         style={{ width: `${sliderPos}%` }}
@@ -330,7 +475,6 @@ export default function Home() {
                           style={{ width: '100%', height: '100%' }}
                         />
                       </div>
-                      {/* スライダーの境界線バー */}
                       <div
                         className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg cursor-ew-resize"
                         style={{ left: `${sliderPos}%` }}
@@ -339,7 +483,6 @@ export default function Home() {
                           ↔
                         </div>
                       </div>
-                      {/* 範囲入力スライダー（透明オーバーレイ） */}
                       <input
                         type="range"
                         min="0"
@@ -378,7 +521,7 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* 成長タイムライン（記録一覧） */}
+              {/* 成長タイムライン */}
               <div>
                 <h3 className="font-bold text-slate-800 text-sm mb-3 px-1">成長タイムライン</h3>
                 <div className="space-y-3">
