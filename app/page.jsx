@@ -5,10 +5,11 @@ import { supabase } from '../lib/supabase';
 import { 
   Camera, Plus, Calendar, Image as ImageIcon, Loader2, 
   Sparkles, Sprout, Download, Upload, Settings, X, CheckCircle,
-  Edit2, Trash2, ChevronLeft, ChevronRight, Maximize2
+  Edit2, Trash2, ChevronLeft, ChevronRight, Maximize2, Copy, Check
 } from 'lucide-react';
 
 export default function Home() {
+  const [userId, setUserId] = useState('');
   const [plants, setPlants] = useState([]);
   const [selectedPlant, setSelectedPlant] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -18,6 +19,8 @@ export default function Home() {
   // 設定・バックアップ
   const [showSettings, setShowSettings] = useState(false);
   const [backupStatus, setBackupStatus] = useState('');
+  const [customUserIdInput, setCustomUserIdInput] = useState('');
+  const [copiedId, setCopiedId] = useState(false);
   const fileInputRef = useRef(null);
 
   // 新規植物登録
@@ -43,11 +46,19 @@ export default function Home() {
   // Before/After スライダー位置（%）
   const [sliderPos, setSliderPos] = useState(50);
 
+  // 端末ごとの固有ユーザーIDを取得または生成
   useEffect(() => {
-    fetchPlants();
+    let currentId = localStorage.getItem('plant_app_user_id');
+    if (!currentId) {
+      currentId = 'user_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+      localStorage.setItem('plant_app_user_id', currentId);
+    }
+    setUserId(currentId);
+    setCustomUserIdInput(currentId);
+    fetchPlants(currentId);
   }, []);
 
-  // キーボードの左右キーで拡大ビューアの前後送り・Escで閉じる
+  // 左右キーで写真送り
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (viewerIndex === null) return;
@@ -59,9 +70,17 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [viewerIndex, logs]);
 
-  const fetchPlants = async () => {
+  const fetchPlants = async (uid) => {
     setLoading(true);
-    const { data, error } = await supabase.from('plants').select('*').order('created_at', { ascending: false });
+    const targetUid = uid || userId;
+    if (!targetUid) return;
+
+    const { data, error } = await supabase
+      .from('plants')
+      .select('*')
+      .eq('user_id', targetUid)
+      .order('created_at', { ascending: false });
+
     if (!error && data) {
       setPlants(data);
       if (data.length > 0) {
@@ -89,11 +108,11 @@ export default function Home() {
   // 植物追加
   const handleAddPlant = async (e) => {
     e.preventDefault();
-    if (!newPlantName.trim()) return;
+    if (!newPlantName.trim() || !userId) return;
 
     const { data, error } = await supabase
       .from('plants')
-      .insert([{ name: newPlantName, species: newPlantSpecies }])
+      .insert([{ name: newPlantName, species: newPlantSpecies, user_id: userId }])
       .select();
 
     if (!error && data) {
@@ -141,7 +160,6 @@ export default function Home() {
 
       if (dbError) throw dbError;
 
-      // 日付順に再ソートして反映
       const updated = [...logs, logData[0]].sort((a, b) => new Date(a.taken_at) - new Date(b.taken_at));
       setLogs(updated);
       setSelectedFile(null);
@@ -198,30 +216,56 @@ export default function Home() {
     }
   };
 
-  // ビューア操作（前へ・次へ）
+  // ビューア操作
   const showPrevPhoto = () => {
-    if (viewerIndex > 0) {
-      setViewerIndex(viewerIndex - 1);
-    }
+    if (viewerIndex > 0) setViewerIndex(viewerIndex - 1);
+  };
+  const showNextPhoto = () => {
+    if (viewerIndex < logs.length - 1) setViewerIndex(viewerIndex + 1);
   };
 
-  const showNextPhoto = () => {
-    if (viewerIndex < logs.length - 1) {
-      setViewerIndex(viewerIndex + 1);
-    }
+  // 端末IDの同期
+  const handleSyncUserId = (e) => {
+    e.preventDefault();
+    if (!customUserIdInput.trim()) return;
+    localStorage.setItem('plant_app_user_id', customUserIdInput.trim());
+    setUserId(customUserIdInput.trim());
+    fetchPlants(customUserIdInput.trim());
+    setBackupStatus('端末キーを同期しました！');
+    setTimeout(() => setBackupStatus(''), 3000);
+  };
+
+  const copyUserId = () => {
+    navigator.clipboard.writeText(userId);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
   };
 
   // バックアップ・エクスポート
   const handleExportData = async () => {
     try {
       setBackupStatus('データを取得中...');
-      const { data: plantsData, error: pError } = await supabase.from('plants').select('*');
-      const { data: logsData, error: lError } = await supabase.from('growth_logs').select('*');
+      const { data: plantsData, error: pError } = await supabase
+        .from('plants')
+        .select('*')
+        .eq('user_id', userId);
 
-      if (pError || lError) throw new Error('データ取得に失敗しました');
+      if (pError) throw pError;
+
+      const plantIds = (plantsData || []).map((p) => p.id);
+      let logsData = [];
+      if (plantIds.length > 0) {
+        const { data: lData, error: lError } = await supabase
+          .from('growth_logs')
+          .select('*')
+          .in('plant_id', plantIds);
+        if (lError) throw lError;
+        logsData = lData || [];
+      }
 
       const backupData = {
         version: '1.0',
+        userId: userId,
         exportedAt: new Date().toISOString(),
         plants: plantsData || [],
         growth_logs: logsData || []
@@ -232,7 +276,7 @@ export default function Home() {
       )}`;
       const downloadAnchor = document.createElement('a');
       downloadAnchor.setAttribute('href', jsonString);
-      downloadAnchor.setAttribute('download', `plant_growth_backup_${new Date().toISOString().slice(0, 10)}.json`);
+      downloadAnchor.setAttribute('download', `plant_backup_${new Date().toISOString().slice(0, 10)}.json`);
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
       downloadAnchor.remove();
@@ -260,8 +304,10 @@ export default function Home() {
           throw new Error('バックアップファイルの形式が正しくありません');
         }
 
-        if (json.plants.length > 0) {
-          const { error: pErr } = await supabase.from('plants').upsert(json.plants);
+        const plantsToInsert = json.plants.map((p) => ({ ...p, user_id: userId }));
+
+        if (plantsToInsert.length > 0) {
+          const { error: pErr } = await supabase.from('plants').upsert(plantsToInsert);
           if (pErr) throw pErr;
         }
 
@@ -271,7 +317,7 @@ export default function Home() {
         }
 
         setBackupStatus('復元が完了しました！');
-        fetchPlants();
+        fetchPlants(userId);
         setTimeout(() => {
           setBackupStatus('');
           setShowSettings(false);
@@ -309,7 +355,7 @@ export default function Home() {
           <button
             onClick={() => setShowSettings(true)}
             className="p-2 rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition shadow-sm"
-            title="バックアップと設定"
+            title="端末キー・バックアップ設定"
           >
             <Settings className="w-4 h-4" />
           </button>
@@ -322,10 +368,9 @@ export default function Home() {
         </div>
       </header>
 
-      {/* 写真拡大ビューア（ライトボックスモーダル） */}
+      {/* 写真拡大ビューア */}
       {currentViewerLog && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex flex-col justify-between p-4 select-none">
-          {/* 上部バー */}
           <div className="flex justify-between items-center text-white/80 pt-2 px-2">
             <span className="text-xs font-medium bg-white/10 px-3 py-1 rounded-full">
               {viewerIndex + 1} / {logs.length} 枚目
@@ -338,38 +383,30 @@ export default function Home() {
             </button>
           </div>
 
-          {/* 中央写真＆送りボタン */}
           <div className="relative flex-1 flex items-center justify-center my-4 overflow-hidden">
             <img
               src={currentViewerLog.photo_url}
               alt="拡大写真"
               className="max-h-full max-w-full object-contain rounded-xl shadow-2xl transition-all duration-200"
             />
-
-            {/* 前へボタン */}
             {viewerIndex > 0 && (
               <button
                 onClick={showPrevPhoto}
                 className="absolute left-2 top-1/2 -translate-y-1/2 p-3 bg-black/50 hover:bg-black/80 text-white rounded-full transition backdrop-blur-sm"
-                title="前の写真"
               >
                 <ChevronLeft className="w-6 h-6" />
               </button>
             )}
-
-            {/* 次へボタン */}
             {viewerIndex < logs.length - 1 && (
               <button
                 onClick={showNextPhoto}
                 className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-black/50 hover:bg-black/80 text-white rounded-full transition backdrop-blur-sm"
-                title="次の写真"
               >
                 <ChevronRight className="w-6 h-6" />
               </button>
             )}
           </div>
 
-          {/* 下部情報バー */}
           <div className="bg-white/10 backdrop-blur-md rounded-2xl p-4 text-white max-w-md mx-auto w-full">
             <div className="flex justify-between items-center mb-1">
               <span className="text-xs text-emerald-300 font-semibold flex items-center gap-1">
@@ -384,7 +421,7 @@ export default function Home() {
                 }}
                 className="text-xs bg-white/20 hover:bg-white/30 text-white px-2.5 py-1 rounded-lg flex items-center gap-1 transition"
               >
-                <Edit2 className="w-3 h-3" /> このログを編集
+                <Edit2 className="w-3 h-3" /> 編集
               </button>
             </div>
             <p className="text-xs text-white/90 whitespace-pre-wrap">
@@ -448,10 +485,10 @@ export default function Home() {
         </div>
       )}
 
-      {/* 設定・バックアップモーダル */}
+      {/* 設定・端末キー・バックアップモーダル */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl relative">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl relative max-h-[90vh] overflow-y-auto">
             <button
               onClick={() => setShowSettings(false)}
               className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"
@@ -459,14 +496,55 @@ export default function Home() {
               <X className="w-5 h-5" />
             </button>
             <h2 className="text-lg font-bold text-slate-800 mb-1 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-emerald-600" /> データ管理・バックアップ
+              <Settings className="w-5 h-5 text-emerald-600" /> 設定・端末キー管理
             </h2>
-            <p className="text-xs text-slate-400 mb-4">全植物の記録と写真リンクをバックアップ／復元できます。</p>
+            <p className="text-xs text-slate-400 mb-4">端末ごとにデータは安全に分離されています。</p>
 
-            <div className="space-y-3">
+            <div className="space-y-4">
+              {/* 端末キーの確認・同期 */}
+              <div className="p-3 border rounded-xl bg-slate-50">
+                <h3 className="text-xs font-bold text-slate-700 mb-1">あなたの端末同期キー</h3>
+                <p className="text-[11px] text-slate-500 mb-2">このキーをスマホなどの別端末に入力すると、同じデータを共有できます。</p>
+                <div className="flex gap-1.5 mb-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={userId}
+                    className="w-full px-2.5 py-1.5 bg-white border rounded-lg text-[11px] font-mono text-slate-600"
+                  />
+                  <button
+                    onClick={copyUserId}
+                    className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 flex-shrink-0"
+                  >
+                    {copiedId ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    コピー
+                  </button>
+                </div>
+
+                <form onSubmit={handleSyncUserId} className="pt-2 border-t border-slate-200">
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">別端末のキーを適用して同期：</label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      placeholder="user_xxxx..."
+                      value={customUserIdInput}
+                      onChange={(e) => setCustomUserIdInput(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-white border rounded-lg text-xs focus:outline-emerald-600"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 flex-shrink-0"
+                    >
+                      適用
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* バックアップ保存 */}
               <div className="p-3 border rounded-xl bg-slate-50">
                 <h3 className="text-xs font-bold text-slate-700 mb-1">データをバックアップ (保存)</h3>
-                <p className="text-[11px] text-slate-500 mb-2">端末にJSONファイルを保存します。</p>
+                <p className="text-[11px] text-slate-500 mb-2">この端末の植物・ログデータをJSONで保存します。</p>
                 <button
                   onClick={handleExportData}
                   className="w-full py-2 bg-slate-800 text-white rounded-lg text-xs font-semibold hover:bg-slate-900 transition flex items-center justify-center gap-1.5"
@@ -475,9 +553,10 @@ export default function Home() {
                 </button>
               </div>
 
+              {/* インポート復元 */}
               <div className="p-3 border rounded-xl bg-slate-50">
                 <h3 className="text-xs font-bold text-slate-700 mb-1">データを復元 (取り込み)</h3>
-                <p className="text-[11px] text-slate-500 mb-2">保存したJSONからデータを復元します。</p>
+                <p className="text-[11px] text-slate-500 mb-2">保存したJSONからデータを取り込みます。</p>
                 <input
                   type="file"
                   accept=".json"
@@ -728,7 +807,6 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* 写真記録ボタン */}
                 <button
                   onClick={() => setShowAddLog(true)}
                   className="w-full py-3 bg-emerald-600 text-white rounded-xl text-sm font-bold shadow hover:bg-emerald-700 transition flex items-center justify-center gap-2"
@@ -737,7 +815,7 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* 成長タイムライン（再編集・拡大機能付き） */}
+              {/* 成長タイムライン */}
               <div>
                 <h3 className="font-bold text-slate-800 text-sm mb-3 px-1 flex items-center justify-between">
                   <span>成長タイムライン ({logs.length}件)</span>
@@ -751,7 +829,6 @@ export default function Home() {
                         key={log.id}
                         className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 flex gap-3 items-center group transition hover:border-slate-300"
                       >
-                        {/* 写真サムネイル（タップで拡大ビューアを開く） */}
                         <div
                           onClick={() => setViewerIndex(originalIndex)}
                           className="relative w-16 h-16 rounded-xl overflow-hidden cursor-pointer flex-shrink-0 group/img bg-slate-100"
@@ -766,7 +843,6 @@ export default function Home() {
                           </div>
                         </div>
 
-                        {/* メモと情報 */}
                         <div className="flex-1 min-w-0">
                           <div className="flex justify-between items-center mb-1">
                             <span className="text-xs font-bold text-slate-700">
@@ -784,7 +860,6 @@ export default function Home() {
                           </p>
                         </div>
 
-                        {/* 編集・削除アクション */}
                         <div className="flex items-center gap-1 pl-1 border-l border-slate-100">
                           <button
                             onClick={() => {
